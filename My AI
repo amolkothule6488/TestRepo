@@ -1,0 +1,277 @@
+You are a senior Java/Spring Boot architect. I need you to design and implement 
+a standalone, configurable Workflow State Tracking Module called "Springbrook 
+Workflow Tracker" using Approach 1 (State Tracking Table with REST Dashboard).
+
+---
+
+## BUSINESS CONTEXT
+
+I have an existing event-driven pipeline that processes financial "Books" 
+end-to-end across two legs:
+
+**Leg 1 — Inbound (Upstream → Power Apps):**
+Upstream System → [Source Adapter] → [Validator] → [Transformer] → 
+[Persistence Layer] → [Consumer Adapter] → Power Apps
+
+**Leg 2 — Outbound (Power Apps → HMS after Recertification):**
+Power Apps → [Recert Adapter] → [Transformer] → [Acceptance Layer] → 
+[Inbound Adapter] → HMS
+
+Each component communicates via dedicated Kafka topics 
+(source topic → component → target topic).
+
+Users work on Books in Power Apps and recertify them. 
+The recertified response flows back through Leg 2 to HMS.
+
+This is a BAU (Business As Usual) financial workflow.
+
+---
+
+## WHAT I NEED
+
+A NEW, STANDALONE Spring Boot microservice/module that:
+
+1. **Passively observes** existing Kafka topics (as an additional consumer group)
+   — it must NOT disturb or interfere with any existing pipeline consumers.
+
+2. **Tracks the state** of every Book as it moves through the pipeline by 
+   consuming from the SAME Kafka topics existing services already use.
+
+3. **Persists workflow state** to a PostgreSQL database.
+
+4. **Exposes REST APIs** for a dashboard to query:
+   - All active books currently in the pipeline
+   - Books pending at Power Apps (awaiting recertification)
+   - Books recertified and returned from Power Apps
+   - Books successfully sent to HMS
+   - Books in error/dead-letter state
+   - Full audit trail for a specific book by bookId
+
+5. **Is fully configurable** via application.yml / environment variables for:
+   - Kafka bootstrap servers, topics, consumer group IDs
+   - PostgreSQL connection details
+   - Multiple workflow definitions (one service handles multiple pipelines)
+   - State mapping: which Kafka topic consumption maps to which BookState
+
+6. **Supports multiple workflows** — one deployed instance can track 
+   multiple different pipelines using separate workflow configurations.
+
+7. **Is deployable on GCP using Helm chart** — provide Helm chart structure 
+   with configurable values.yaml for all environment-specific settings.
+
+---
+
+## TECH STACK
+
+- Java 21
+- Spring Boot 3.x
+- Spring Kafka (consumer only, no producing)
+- Spring Data JPA
+- PostgreSQL
+- Lombok
+- Maven
+- Helm (for GCP deployment)
+- Docker (provide Dockerfile)
+
+---
+
+## CONFIGURABLE WORKFLOW DEFINITION (Critical Requirement)
+
+The service must support workflow configuration like this in application.yml:
+
+```yaml
+workflow:
+  definitions:
+    - workflowId: "SPRINGBROOK_BOOK_FLOW"
+      description: "End to end book processing workflow"
+      entityIdField: "bookId"        # JSON field name to extract entity ID
+      topics:
+        - topicName: "source.adapter.output"
+          mapsToState: "RECEIVED"
+        - topicName: "validator.output"
+          mapsToState: "VALIDATED"
+        - topicName: "transformer.output"
+          mapsToState: "TRANSFORMED"
+        - topicName: "persistence.output"
+          mapsToState: "PERSISTED"
+        - topicName: "consumer.adapter.output"
+          mapsToState: "SENT_TO_POWERAPP"
+        - topicName: "recert.adapter.output"
+          mapsToState: "RECERTIFIED"
+        - topicName: "acceptance.output"
+          mapsToState: "RECERT_ACCEPTED"
+        - topicName: "hms.adapter.output"
+          mapsToState: "SENT_TO_HMS"
+
+    - workflowId: "ANOTHER_PIPELINE_FLOW"
+      description: "Another pipeline workflow"
+      entityIdField: "transactionId"
+      topics:
+        - topicName: "pipeline2.source.output"
+          mapsToState: "RECEIVED"
+        - topicName: "pipeline2.transform.output"
+          mapsToState: "TRANSFORMED"
+
+
+The service must dynamically register Kafka listeners
+for ALL configured topics at startup.
+DELIVERABLES — implement all of these:
+1. Project Structure
+Provide complete Maven project structure with all packages.
+2. Domain & Enums
+WorkflowState enum (all states including error states)
+BookWorkflowEntity JPA entity (bookId, workflowId, currentState,
+previousState, all timestamp fields per state, retryCount,
+errorMessage, metadata as JSONB)
+3. Configuration Classes
+WorkflowProperties — maps the yml config above using @ConfigurationProperties
+KafkaConsumerConfig — dynamic consumer factory setup
+4. Dynamic Kafka Listener Registration
+A WorkflowKafkaListenerRegistrar that reads WorkflowProperties at startup
+and programmatically registers a MessageListenerContainer for every
+configured topic using KafkaListenerEndpointRegistry or
+ConcurrentMessageListenerContainer
+Each listener must use a UNIQUE consumer group ID per workflow+topic
+so existing consumers are never affected
+On message receipt: extract entityId from JSON payload using configured
+entityIdField, then call WorkflowStateService to transition state
+5. Service Layer
+WorkflowStateService — handles state transitions, upserts entity,
+records timestamps, handles idempotency (same state received twice
+should not error)
+6. Repository
+BookWorkflowRepository — Spring Data JPA with custom query methods
+7. REST API Controller — WorkflowDashboardController
+Endpoints:
+GET /api/workflow/{workflowId}/active
+GET /api/workflow/{workflowId}/pending-recertification
+GET /api/workflow/{workflowId}/recertified
+GET /api/workflow/{workflowId}/sent-to-hms
+GET /api/workflow/{workflowId}/failed
+GET /api/workflow/{workflowId}/book/{bookId}          ← full audit trail
+GET /api/workflow/{workflowId}/summary                ← count by state
+GET /api/workflow/health                              ← lists all registered workflows
+8. Database
+PostgreSQL DDL script (schema.sql) for the workflow state table
+and a workflow_audit_log table that records EVERY state transition
+with timestamp (separate from the main entity)
+9. application.yml
+Full application.yml with:
+Server config
+Kafka config
+PostgreSQL datasource
+JPA/Hibernate config
+Workflow definitions as shown above
+All sensitive values as ${ENV_VAR:default} placeholders
+10. Dockerfile
+Multi-stage Dockerfile for GCP deployment.
+11. Helm Chart
+Provide complete Helm chart with:
+helm/
+Chart.yaml
+values.yaml          ← all configurable: image, replicas, kafka, db, workflow definitions
+templates/
+deployment.yaml
+service.yaml
+configmap.yaml     ← workflow definitions mounted as config
+secret.yaml        ← db password, kafka credentials
+hpa.yaml           ← horizontal pod autoscaler
+ingress.yaml
+12. README
+How to add a new pipeline workflow (just yml config, no code change)
+How to deploy on GCP using Helm
+Environment variable reference table
+KEY CONSTRAINTS
+Existing Kafka pipelines must be ZERO affected — use separate consumer group IDs
+No Kafka producing — this module only consumes
+Idempotent state transitions — safe to receive duplicate Kafka messages
+All config externalized — no hardcoded topic names or states
+One JAR, one Docker image handles ALL configured workflows
+Thread-safe dynamic listener registration at startup
+
+
+---
+
+## Tips for Using This Prompt in Your Workspace
+
+- **Start with deliverables 1–5** in one session, then continue 6–12 in follow-up messages if context gets long.
+- If Claude stops mid-way, say: *"Continue from where you stopped, next deliverable is [X]"*
+- For Helm chart specifically, say: *"Now generate the complete Helm chart for GCP deployment"* as a follow-up if needed.
+- You can also say: *"Now generate only the DDL and application.yml"* to get specific parts in isolation.
+
+
+Excellent question — and this is the **core architectural insight** you need to get right.
+
+## The Answer: Passive Eavesdropping via Separate Consumer Group
+
+Your workflow component **never needs the existing services to send it anything**. It simply **listens to the same Kafka topics** that already exist in your pipeline, using its **own independent consumer group ID**.
+
+---
+
+## How Kafka Consumer Groups Work
+
+```
+Existing Topic: "validator.output"
+        │
+        ├──── Consumer Group: "validator-service-group"    ← Your existing Validator service
+        │                     (reads & processes messages)
+        │
+        └──── Consumer Group: "workflow-tracker-group"     ← Your NEW workflow component
+                              (reads same messages, just updates state)
+```
+
+**Kafka delivers every message to EVERY consumer group independently.** Each group maintains its own offset pointer. So:
+
+- Your existing service reads the message → does its job → moves on
+- Your workflow tracker reads the **same message** → extracts bookId → updates state in DB
+- Neither knows the other exists
+- Neither affects the other
+
+---
+
+## Visualizing It End to End
+
+```
+[Source Adapter] ──publishes──→ "source.adapter.output" topic
+                                        │
+                    ┌───────────────────┴────────────────────┐
+                    ↓                                         ↓
+        "validator-group"                        "workflow-tracker-group"
+        (Existing Validator Service)             (Your NEW module)
+        Processes the book                       Reads bookId → sets state = RECEIVED
+```
+
+Same thing happens at every topic in your pipeline. The workflow tracker simply **taps into every topic** and updates state silently.
+
+---
+
+## Why This is Safe
+
+| Concern | Answer |
+|---|---|
+| Will it slow down existing consumers? | No — Kafka groups are fully independent |
+| Will it cause duplicate processing? | No — existing group is unaffected |
+| What if workflow tracker is down? | It catches up automatically when it restarts, from its own saved offset |
+| What if it falls behind? | It processes at its own pace — no impact on pipeline |
+
+---
+
+## This is Exactly Why the Prompt Says
+
+```yaml
+topics:
+  - topicName: "validator.output"
+    mapsToState: "VALIDATED"
+```
+
+And the dynamic listener registers with:
+```
+consumer.group.id = "workflow-tracker-SPRINGBROOK_BOOK_FLOW-validator.output"
+```
+
+A **unique group ID per workflow per topic** — completely isolated from your existing services.
+
+So to directly answer your question: **your existing pipeline services don't need to know this component exists at all.** Zero code change, zero coordination need
+
+ed.
+
